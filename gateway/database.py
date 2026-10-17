@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get("DB_PATH", "/data/sentinelshield.db")
+DB_PATH = os.environ.get("DB_PATH", "/tmp/sentinelshield.db")
 
 
 def get_connection() -> sqlite3.Connection:

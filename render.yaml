@@ -1,55 +1,60 @@
+# render.yaml — Free-tier Render deployment (no Blueprint, no disk, no private service)
+# Deploy each service MANUALLY via dashboard.render.com → New Web Service
+# See README for step-by-step instructions.
+
 services:
 
-  # ── Protected Demo Application (Private — not publicly reachable) ────────────
-  - type: pserv          # Private Service: only reachable from other Render services
+  # ── Protected Demo Application (free Web Service — URL kept unlisted) ─────────
+  # On free tier we can't use Private Services, so this runs as a normal web
+  # service. Don't share its URL publicly — the gateway is the only entry point.
+  - type: web
     name: sentinelshield-protected-app
     runtime: docker
     dockerfilePath: ./protected_app/Dockerfile
     dockerContext: ./protected_app
+    plan: free
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
 
-  # ── WAF Gateway (Public Web Service + Persistent Disk for SQLite) ─────────────
+  # ── WAF Gateway (free Web Service, SQLite in /tmp — ephemeral but works) ───────
+  # Note: /tmp resets on restart on free tier. Acceptable for demo purposes.
   - type: web
     name: sentinelshield-gateway
     runtime: docker
     dockerfilePath: ./gateway/Dockerfile
     dockerContext: ./gateway
-    disk:
-      name: waf-data
-      mountPath: /data
-      sizeGB: 1
+    plan: free
     envVars:
       - key: PROTECTED_APP_URL
         fromService:
           name: sentinelshield-protected-app
-          type: pserv
-          property: hostport      # gives host:port; gateway prefixes http:// in code
+          type: web
+          property: host
       - key: DB_PATH
-        value: /data/sentinelshield.db
+        value: /tmp/sentinelshield.db   # ephemeral on free tier (no persistent disk)
       - key: API_SECRET
-        generateValue: true       # Auto-generates a secure random secret on first deploy
+        generateValue: true
       - key: PYTHONUNBUFFERED
         value: "1"
 
-  # ── Streamlit Dashboard (Public Web Service) ──────────────────────────────────
+  # ── Streamlit Dashboard (free Web Service) ─────────────────────────────────────
   - type: web
     name: sentinelshield-dashboard
     runtime: docker
     dockerfilePath: ./dashboard/Dockerfile
     dockerContext: ./dashboard
+    plan: free
     envVars:
       - key: GATEWAY_URL
         fromService:
           name: sentinelshield-gateway
           type: web
-          property: host          # gives the .onrender.com hostname; code prefixes https://
+          property: host
       - key: API_SECRET
         fromService:
           name: sentinelshield-gateway
           type: web
-          envVarKey: API_SECRET   # Share the same generated secret
+          envVarKey: API_SECRET
       - key: PYTHONUNBUFFERED
         value: "1"
-

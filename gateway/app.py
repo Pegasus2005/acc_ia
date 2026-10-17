@@ -36,9 +36,13 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})  # dashboard is same-network
 
 PROTECTED_APP_URL = os.environ.get("PROTECTED_APP_URL", "http://protected-app:5001")
-# Render injects hostport (host:port) without scheme; ensure we always have http://
+# Handle schemes for Render and local URLs; strip any trailing slashes
 if PROTECTED_APP_URL and not PROTECTED_APP_URL.startswith(("http://", "https://")):
-    PROTECTED_APP_URL = "http://" + PROTECTED_APP_URL
+    if "onrender.com" in PROTECTED_APP_URL:
+        PROTECTED_APP_URL = "https://" + PROTECTED_APP_URL
+    else:
+        PROTECTED_APP_URL = "http://" + PROTECTED_APP_URL
+PROTECTED_APP_URL = PROTECTED_APP_URL.rstrip("/")
 API_SECRET = os.environ.get("API_SECRET", "sentinelshield-demo-secret")
 VERSION = "1.0.0"
 

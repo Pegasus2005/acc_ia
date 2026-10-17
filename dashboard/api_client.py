@@ -10,6 +10,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:5000")
 # Render injects hostname only without scheme; ensure we always have a scheme
 if GATEWAY_URL and not GATEWAY_URL.startswith(("http://", "https://")):
     GATEWAY_URL = "https://" + GATEWAY_URL
+GATEWAY_URL = GATEWAY_URL.rstrip("/")
 API_SECRET = os.environ.get("API_SECRET", "sentinelshield-demo-secret")
 
 _HEADERS = {"X-API-Key": API_SECRET, "Content-Type": "application/json"}

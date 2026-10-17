@@ -1,0 +1,102 @@
+services:
+
+  # ── Protected Demo Application ─────────────────────────────────────────────
+  # NOT exposed to host — only reachable from the internal Docker network.
+  protected-app:
+    build:
+      context: ./protected_app
+      dockerfile: Dockerfile
+    container_name: sentinelshield-protected-app
+    restart: unless-stopped
+    networks:
+      - sentinelshield-net
+    # Deliberately NO ports: section — cannot be reached from host machine
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ── WAF Gateway ────────────────────────────────────────────────────────────
+  waf-gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: sentinelshield-gateway
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only — not exposed to the network
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - waf-data:/data
+    networks:
+      - sentinelshield-net
+    environment:
+      - PROTECTED_APP_URL=http://protected-app:5001
+      - DB_PATH=/data/sentinelshield.db
+      - API_SECRET=${API_SECRET:-sentinelshield-demo-secret}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      protected-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── Streamlit Dashboard ────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: sentinelshield-dashboard
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only
+      - "127.0.0.1:8501:8501"
+    networks:
+      - sentinelshield-net
+    environment:
+      - GATEWAY_URL=http://waf-gateway:5000
+      - API_SECRET=${API_SECRET:-sentinelshield-demo-secret}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      waf-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+networks:
+  sentinelshield-net:
+    driver: bridge
+    name: sentinelshield-net
+
+volumes:
+  waf-data:
+    name: sentinelshield-waf-data
+    # Named volume — persists security logs across container restarts.
+    # WARNING: 'docker compose down -v' will delete this volume and all logs.

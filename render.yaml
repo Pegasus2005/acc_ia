@@ -1,0 +1,55 @@
+services:
+
+  # ── Protected Demo Application (Private — not publicly reachable) ────────────
+  - type: pserv          # Private Service: only reachable from other Render services
+    name: sentinelshield-protected-app
+    runtime: docker
+    dockerfilePath: ./protected_app/Dockerfile
+    dockerContext: ./protected_app
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  # ── WAF Gateway (Public Web Service + Persistent Disk for SQLite) ─────────────
+  - type: web
+    name: sentinelshield-gateway
+    runtime: docker
+    dockerfilePath: ./gateway/Dockerfile
+    dockerContext: ./gateway
+    disk:
+      name: waf-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PROTECTED_APP_URL
+        fromService:
+          name: sentinelshield-protected-app
+          type: pserv
+          property: hostport      # gives host:port; gateway prefixes http:// in code
+      - key: DB_PATH
+        value: /data/sentinelshield.db
+      - key: API_SECRET
+        generateValue: true       # Auto-generates a secure random secret on first deploy
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  # ── Streamlit Dashboard (Public Web Service) ──────────────────────────────────
+  - type: web
+    name: sentinelshield-dashboard
+    runtime: docker
+    dockerfilePath: ./dashboard/Dockerfile
+    dockerContext: ./dashboard
+    envVars:
+      - key: GATEWAY_URL
+        fromService:
+          name: sentinelshield-gateway
+          type: web
+          property: host          # gives the .onrender.com hostname; code prefixes https://
+      - key: API_SECRET
+        fromService:
+          name: sentinelshield-gateway
+          type: web
+          envVarKey: API_SECRET   # Share the same generated secret
+      - key: PYTHONUNBUFFERED
+        value: "1"
+

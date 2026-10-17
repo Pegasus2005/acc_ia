@@ -7,6 +7,7 @@ import sqlite3
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
@@ -14,6 +15,20 @@ from typing import Optional, List, Dict, Any
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get("DB_PATH", "/tmp/sentinelshield.db")
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    """Set essential connection pragmas in a safe order."""
+    conn.row_factory = sqlite3.Row
+    # Set busy_timeout FIRST so any subsequent lock contention waits instead of erroring
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        # If another worker is holding an exclusive lock or initializing, proceed safely
+        pass
 
 
 def get_connection() -> sqlite3.Connection:
@@ -24,10 +39,7 @@ def get_connection() -> sqlite3.Connection:
         check_same_thread=False,
         isolation_level=None  # autocommit; we manage transactions manually
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # concurrent reads
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
+    _configure_connection(conn)
     return conn
 
 
@@ -35,20 +47,17 @@ def get_connection() -> sqlite3.Connection:
 def db_transaction():
     """
     Context manager for atomic database transactions.
-    Uses isolation_level='' (deferred) so SQLite manages BEGIN/COMMIT.
+    Uses BEGIN IMMEDIATE to prevent multi-worker upgrade deadlocks in WAL mode.
     """
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30,
         check_same_thread=False,
-        isolation_level="",  # manual transaction mode without autocommit conflict
+        isolation_level="",  # manual transaction mode
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
+    _configure_connection(conn)
     try:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.execute("COMMIT")
     except Exception:
@@ -62,59 +71,69 @@ def db_transaction():
 
 
 def init_db() -> None:
-    """Initialize schema and seed default security rules."""
-    # executescript() issues an implicit COMMIT before running, so we use
-    # a plain connection here instead of db_transaction().
-    conn = get_connection()
-    try:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS security_events (
-                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-                request_id              TEXT    NOT NULL,
-                timestamp_utc           TEXT    NOT NULL,
-                method                  TEXT    NOT NULL,
-                route                   TEXT    NOT NULL,
-                decision                TEXT    NOT NULL,
-                status_code             INTEGER NOT NULL,
-                matched_rule_ids        TEXT    NOT NULL DEFAULT '[]',
-                attack_category         TEXT    NOT NULL DEFAULT 'NONE',
-                severity                TEXT    NOT NULL DEFAULT 'INFO',
-                reason                  TEXT    NOT NULL DEFAULT '',
-                processing_time_ms      REAL    NOT NULL DEFAULT 0,
-                sanitized_client_id     TEXT    NOT NULL DEFAULT ''
-            );
+    """Initialize schema and seed default security rules safely across multiple workers."""
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
-            CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON security_events(timestamp_utc);
-            CREATE INDEX IF NOT EXISTS idx_events_decision   ON security_events(decision);
-            CREATE INDEX IF NOT EXISTS idx_events_request_id ON security_events(request_id);
-            CREATE INDEX IF NOT EXISTS idx_events_severity   ON security_events(severity);
+    for attempt in range(5):
+        try:
+            conn = get_connection()
+            try:
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS security_events (
+                        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                        request_id              TEXT    NOT NULL,
+                        timestamp_utc           TEXT    NOT NULL,
+                        method                  TEXT    NOT NULL,
+                        route                   TEXT    NOT NULL,
+                        decision                TEXT    NOT NULL,
+                        status_code             INTEGER NOT NULL,
+                        matched_rule_ids        TEXT    NOT NULL DEFAULT '[]',
+                        attack_category         TEXT    NOT NULL DEFAULT 'NONE',
+                        severity                TEXT    NOT NULL DEFAULT 'INFO',
+                        reason                  TEXT    NOT NULL DEFAULT '',
+                        processing_time_ms      REAL    NOT NULL DEFAULT 0,
+                        sanitized_client_id     TEXT    NOT NULL DEFAULT ''
+                    );
 
-            CREATE TABLE IF NOT EXISTS security_rules (
-                rule_id             TEXT    PRIMARY KEY,
-                name                TEXT    NOT NULL,
-                category            TEXT    NOT NULL,
-                description         TEXT    NOT NULL,
-                severity            TEXT    NOT NULL,
-                enabled             INTEGER NOT NULL DEFAULT 1,
-                configuration_json  TEXT    NOT NULL DEFAULT '{}',
-                updated_at          TEXT    NOT NULL
-            );
+                    CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON security_events(timestamp_utc);
+                    CREATE INDEX IF NOT EXISTS idx_events_decision   ON security_events(decision);
+                    CREATE INDEX IF NOT EXISTS idx_events_request_id ON security_events(request_id);
+                    CREATE INDEX IF NOT EXISTS idx_events_severity   ON security_events(severity);
 
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp_utc       TEXT    NOT NULL,
-                actor               TEXT    NOT NULL DEFAULT 'system',
-                action              TEXT    NOT NULL,
-                target              TEXT    NOT NULL DEFAULT '',
-                sanitized_details   TEXT    NOT NULL DEFAULT ''
-            );
+                    CREATE TABLE IF NOT EXISTS security_rules (
+                        rule_id             TEXT    PRIMARY KEY,
+                        name                TEXT    NOT NULL,
+                        category            TEXT    NOT NULL,
+                        description         TEXT    NOT NULL,
+                        severity            TEXT    NOT NULL,
+                        enabled             INTEGER NOT NULL DEFAULT 1,
+                        configuration_json  TEXT    NOT NULL DEFAULT '{}',
+                        updated_at          TEXT    NOT NULL
+                    );
 
-            CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp_utc);
-        """)
-    finally:
-        conn.close()
+                    CREATE TABLE IF NOT EXISTS audit_events (
+                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp_utc       TEXT    NOT NULL,
+                        actor               TEXT    NOT NULL DEFAULT 'system',
+                        action              TEXT    NOT NULL,
+                        target              TEXT    NOT NULL DEFAULT '',
+                        sanitized_details   TEXT    NOT NULL DEFAULT ''
+                    );
 
-    _seed_default_rules()
+                    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp_utc);
+                """)
+            finally:
+                conn.close()
+
+            _seed_default_rules()
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < 4:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
 
 
 def _seed_default_rules() -> None:

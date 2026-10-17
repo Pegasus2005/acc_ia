@@ -422,7 +422,7 @@ def api_audit():
 def create_app():
     init_db()
     logger.info("SentinelShield Gateway v%s started. DB: %s", VERSION,
-                os.environ.get("DB_PATH", "/data/sentinelshield.db"))
+                os.environ.get("DB_PATH", "/tmp/sentinelshield.db"))
     return app
 
 

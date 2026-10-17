@@ -1,207 +1,131 @@
-# 🛡️ SentinelShield: Web Application Firewall & Attack Simulation Platform
+# 🛡️ SentinelShield — Web Application Firewall & Security Operations Platform
 
-> **A Dockerized educational security gateway for detecting, blocking, logging, and analyzing common web application attacks.**
+> A cloud-deployed, intelligent **reverse-proxy WAF** that inspects every incoming HTTP request, blocks cyberattacks in real time, and gives security teams an interactive operations dashboard for monitoring, forensics, and rule management.
+
+---
+
+## 📺 Live Demo
+
+| Service | URL |
+|:--------|:----|
+| 🛡️ WAF Gateway | `https://sentinelshield-gateway.onrender.com` |
+| 📊 Security Dashboard | `https://sentinelshield-dashboard.onrender.com` |
+
+> **Free tier note:** Services spin down after 15 minutes of inactivity and take ~30 seconds to cold-start on first visit.
 
 ---
 
 ## Table of Contents
 
-1. [Problem Statement](#1-problem-statement)
-2. [Project Objectives](#2-project-objectives)
-3. [Threat Model](#3-threat-model)
-4. [System Architecture](#4-system-architecture)
-5. [Technology Stack](#5-technology-stack)
-6. [Component Descriptions](#6-component-descriptions)
-7. [Request Inspection Workflow](#7-request-inspection-workflow)
-8. [Detection Rules](#8-detection-rules)
-9. [Database Schema](#9-database-schema)
-10. [API Reference](#10-api-reference)
-11. [Docker Architecture](#11-docker-architecture)
-12. [Installation](#12-installation)
-13. [Startup & Shutdown](#13-startup--shutdown)
-14. [Running Tests](#14-running-tests)
-15. [Troubleshooting](#15-troubleshooting)
-16. [Security Limitations](#16-security-limitations)
-17. [Future Enhancements](#17-future-enhancements)
-18. [Optional AWS Deployment](#18-optional-aws-deployment)
-19. [Screencast Script](#19-screencast-script)
-20. [Presentation Slides Outline](#20-presentation-slides-outline)
+1. [What It Does](#1-what-it-does)
+2. [Architecture](#2-architecture)
+3. [Technology Stack](#3-technology-stack)
+4. [Detection Rules](#4-detection-rules)
+5. [Dashboard Pages](#5-dashboard-pages)
+6. [API Reference](#6-api-reference)
+7. [Database Schema](#7-database-schema)
+8. [Local Development](#8-local-development)
+9. [Cloud Deployment (Render)](#9-cloud-deployment-render)
+10. [Security Limitations](#10-security-limitations)
+11. [Demo Script](#11-demo-script-25-minutes)
 
 ---
 
-## 1. Problem Statement
+## 1. What It Does
 
-Web applications face constant threats from SQL injection, cross-site scripting, path traversal, and volumetric abuse. Understanding how these attacks work — and how they are detected — is a core competency in information assurance. This project builds a functional educational security gateway that demonstrates attack detection in real time, without requiring expensive commercial tools or cloud subscriptions.
+Web applications face constant threats from SQL injection, cross-site scripting, path traversal, and volumetric abuse. SentinelShield sits **in front of any backend application** as a transparent reverse proxy:
 
----
-
-## 2. Project Objectives
-
-- Inspect HTTP requests before they reach a protected application.
-- Detect SQL injection, XSS, path traversal, and anomalous inputs.
-- Block malicious requests; forward legitimate ones.
-- Log all security decisions to a persistent SQLite database.
-- Provide a live dashboard with real statistics and analytics.
-- Allow rule enabling/disabling for demonstration purposes.
-- Run entirely on a local machine with Docker Compose.
-- Prove behavior with automated unit and integration tests.
+- **Intercepts** every HTTP request before it reaches the backend.
+- **Inspects** headers, query parameters, form data, and the request body against 10+ security rules.
+- **Blocks** malicious requests with HTTP 403/429 — the backend never sees them.
+- **Forwards** legitimate requests to the protected application and relays the response.
+- **Logs** every decision (ALLOW/BLOCK/RATE_LIMITED) to a SQLite database with full forensic metadata.
+- **Exposes** a Streamlit Security Operations Center for live monitoring, attack simulation, rule management, and reporting.
 
 ---
 
-## 3. Threat Model
+## 2. Architecture
 
-| Threat | Description | Mitigation |
-|--------|-------------|------------|
-| SQL Injection | Attacker injects SQL syntax to manipulate database queries | Pattern detection (SQL-001–004), parameterized queries in protected app |
-| Cross-Site Scripting | Attacker injects scripts executed by other users' browsers | Pattern detection (XSS-001–003), HTML escaping in protected app |
-| Path Traversal | Attacker accesses files outside intended directories | Pattern detection (PT-001), input normalization |
-| Request Flooding | Attacker overwhelms the application with requests | Rate limiting (RL-001) |
-| Oversized Payloads | Attacker sends large bodies to cause resource exhaustion | Body-size validation (VAL-002) |
-| HTTP Method Abuse | Attacker uses unexpected methods (TRACE, CONNECT) | Method allowlist (VAL-003) |
-
-**Not in scope:** Authentication bypass, business logic flaws, deserialization attacks, server-side request forgery.
-
----
-
-## 4. System Architecture
-
-```mermaid
-graph TB
-    Browser["🌐 Browser / Demo Client"] --> Dashboard["📊 Streamlit Dashboard\n(port 8501)"]
-    Dashboard -->|"HTTP API calls"| Gateway["🛡️ Flask WAF Gateway\n(port 5000)"]
-    Browser -->|"Direct demo requests"| Gateway
-
-    subgraph Gateway["🛡️ WAF Gateway Service"]
-        direction TB
-        RE["Rule Engine\n(SQL / XSS / PT / Val / RL)"]
-        LOG["Event Logger → SQLite"]
-        FWD["Request Forwarder"]
-        RE --> LOG
-        RE --> FWD
-    end
-
-    Gateway -->|"Docker internal network only"| ProtectedApp["🔒 Protected Demo App\n(no host port)"]
-
-    subgraph Storage["💾 Persistent Storage"]
-        DB["SQLite Database\n(named Docker volume)"]
-    end
-
-    LOG --> DB
-    Dashboard -->|"reads stats, rules, events"| DB
+```text
+       Internet Traffic
+              │
+              ▼
+ ┌────────────────────────────┐
+ │   SentinelShield Gateway   │  ← Inspects all requests
+ │  (Flask + Gunicorn, :5000) │    Rules engine runs on every hit
+ │    Logs events to SQLite   │
+ └────────────┬───────────────┘
+              │
+     ┌────────┴────────┐
+     │                 │
+ [MALICIOUS]        [SAFE]
+     │                 │
+     ▼                 ▼
+🚫 BLOCKED (403)  Protected App
+   Logged to DB   (Flask, :5001)
+     │
+     ▼
+ ┌────────────────────────────┐
+ │   Streamlit SOC Dashboard  │  ← Reads from Gateway API
+ │   (Streamlit, :8501)       │    Analytics, forensics, rules,
+ │                            │    attack simulation
+ └────────────────────────────┘
 ```
 
+**Security Properties:**
+- Protected app has **no public port** — only the Gateway can reach it (via `PROTECTED_APP_URL`).
+- All containers run as **non-root users**.
+- Defensive HTTP security headers are injected on every response (`X-Frame-Options`, `CSP`, `HSTS`).
+- SQLite uses **WAL mode** with `BEGIN IMMEDIATE` transactions for safe multi-worker concurrency.
+
 ---
 
-## 5. Technology Stack
+## 3. Technology Stack
 
 | Component | Technology | Version |
-|-----------|-----------|---------|
-| Gateway | Python / Flask | 3.11 / 3.0.3 |
+|:----------|:-----------|:--------|
+| WAF Gateway | Python / Flask | 3.11 / 3.0.3 |
 | WSGI Server | Gunicorn | 22.0.0 |
 | Protected App | Python / Flask | 3.11 / 3.0.3 |
 | Dashboard | Streamlit | 1.35.0 |
 | Charts | Plotly | 5.22.0 |
-| Data Analysis | Pandas | 2.2.2 |
-| Database | SQLite | Built-in |
+| Data | Pandas + PyArrow | 2.2.2 / <17 |
+| Database | SQLite (WAL mode) | Built-in |
 | HTTP Client | Requests | 2.32.3 |
-| Testing | pytest | 8.2.2 |
-| Containerisation | Docker Compose | v2 |
+| Containers | Docker (3 services) | — |
+| Cloud | Render (free tier) | — |
 
 ---
 
-## 6. Component Descriptions
-
-### WAF Gateway (`gateway/`)
-- `app.py` — Flask application, proxy handler, all API endpoints.
-- `rules_engine.py` — Compiled regex patterns, rule evaluation, rate limiter.
-- `database.py` — SQLite schema, event logging, rule management, audit trail.
-
-### Protected Demo App (`protected_app/`)
-- `app.py` — Six safe endpoints with static sample data and HTML escaping. **No host port binding.**
-
-### Streamlit Dashboard (`dashboard/`)
-- `Home.py` — Entry point, global CSS theme.
-- `pages/1_Overview.py` — KPI cards, 5 live Plotly charts.
-- `pages/2_Attack_Simulator.py` — 10 test scenarios, real gateway requests.
-- `pages/3_Security_Logs.py` — Filterable, searchable, exportable event log.
-- `pages/4_Rules_Config.py` — Enable/disable rules, reset to defaults.
-- `pages/5_Reports.py` — Analytics, trend charts, dual export.
-- `pages/6_System_Info.py` — Health checks, DB stats, architecture.
-- `api_client.py` — Shared HTTP client for all pages.
-
----
-
-## 7. Request Inspection Workflow
-
-```
-Incoming Request
-      │
-      ▼
-1. Generate request_id (UUID4)
-2. Record timestamp, method, path, client IP
-3. Enforce body size limit (read up to MAX_BODY_INSPECT)
-      │
-      ▼
-4. Validate HTTP method → VAL-003
-5. Validate URL length  → VAL-001
-6. Validate body size   → VAL-002
-      │
-      ▼
-7. Normalize user inputs (URL-decode, up to 3 rounds)
-      │
-      ▼
-8. Path traversal scan  → PT-001
-9. SQL injection scan   → SQL-001, SQL-002, SQL-003, SQL-004
-10. XSS scan            → XSS-001, XSS-002, XSS-003
-      │
-      ▼
-11. Rate limiting check → RL-001
-      │
-      ▼
-12. Decision:
-    ┌─ Matches found → BLOCK (403) or VALIDATION_ERROR (400)
-    └─ No matches    → ALLOW → Forward to protected app
-      │
-      ▼
-13. Log event to SQLite
-14. Return response to client
-```
-
----
-
-## 8. Detection Rules
+## 4. Detection Rules
 
 ### SQL Injection
 
-| Rule ID | Pattern | Severity |
-|---------|---------|----------|
-| SQL-001 | Tautologies: `' OR '1'='1` | HIGH |
-| SQL-002 | UNION SELECT constructions | HIGH |
-| SQL-003 | SQL comment markers `--` `/**/` | MEDIUM |
-| SQL-004 | DDL/DML: DROP TABLE, DELETE FROM, INSERT INTO | HIGH |
+| Rule ID | What It Detects | Severity |
+|:--------|:----------------|:---------|
+| SQL-001 | Tautologies: `' OR '1'='1`, `' OR 1=1--` | HIGH |
+| SQL-002 | `UNION SELECT` data extraction | HIGH |
+| SQL-003 | SQL comment truncation `--` `/**/` | MEDIUM |
+| SQL-004 | DDL/DML: `DROP TABLE`, `DELETE FROM`, `INSERT INTO` | HIGH |
 
-**Limitations:** Keyword-based detection has false negatives (novel encodings, out-of-band channels). Does not detect second-order injection.
+### Cross-Site Scripting (XSS)
 
-### Cross-Site Scripting
-
-| Rule ID | Pattern | Severity |
-|---------|---------|----------|
-| XSS-001 | `<script>` tags | HIGH |
+| Rule ID | What It Detects | Severity |
+|:--------|:----------------|:---------|
+| XSS-001 | `<script>` tag injection | HIGH |
 | XSS-002 | `javascript:` URI scheme | HIGH |
-| XSS-003 | Event handlers: `onerror=`, `onload=`, etc. | MEDIUM |
-
-**Limitations:** Cannot detect DOM-based XSS or server-side template injection. Relies on output escaping in the protected app as a second defence layer.
+| XSS-003 | Event handlers: `onerror=`, `onload=`, `onmouseover=` | MEDIUM |
 
 ### Path Traversal
 
-| Rule ID | Pattern | Severity |
-|---------|---------|----------|
-| PT-001 | `../`, `%2e%2e/`, `%252e%252e` | HIGH |
+| Rule ID | What It Detects | Severity |
+|:--------|:----------------|:---------|
+| PT-001 | `../`, `%2e%2e/`, `%252e%252e` (URL-decoded up to 3 rounds) | HIGH |
 
 ### Validation
 
 | Rule ID | Check | Threshold |
-|---------|-------|-----------|
+|:--------|:------|:----------|
 | VAL-001 | URL max length | 2048 characters |
 | VAL-002 | Request body max size | 100 KB |
 | VAL-003 | HTTP method allowlist | GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS |
@@ -209,435 +133,335 @@ Incoming Request
 ### Rate Limiting
 
 | Rule ID | Limit | Window |
-|---------|-------|--------|
-| RL-001 | 30 requests | 60 seconds |
+|:--------|:------|:-------|
+| RL-001 | 30 requests per client IP | 60 seconds sliding window |
 
 ---
 
-## 9. Database Schema
+## 5. Dashboard Pages
 
-### security_events
-| Column | Type | Description |
-|--------|------|-------------|
-| id | INTEGER PK | Auto-increment |
-| request_id | TEXT | UUID4 correlation ID |
-| timestamp_utc | TEXT | ISO-8601 UTC timestamp |
-| method | TEXT | HTTP method |
-| route | TEXT | Sanitized request path |
-| decision | TEXT | ALLOW / BLOCK / RATE_LIMITED / VALIDATION_ERROR |
-| status_code | INTEGER | HTTP response code |
-| matched_rule_ids | TEXT | JSON array of matched rule IDs |
-| attack_category | TEXT | SQL_INJECTION / XSS / PATH_TRAVERSAL / VALIDATION / RATE_LIMIT / NONE |
-| severity | TEXT | INFO / LOW / MEDIUM / HIGH / CRITICAL |
-| reason | TEXT | Human-readable detection reason |
-| processing_time_ms | REAL | Gateway processing time |
-| sanitized_client_id | TEXT | Client IP address |
-
-### security_rules
-| Column | Type | Description |
-|--------|------|-------------|
-| rule_id | TEXT PK | e.g. SQL-001 |
-| name | TEXT | Display name |
-| category | TEXT | Rule category |
-| description | TEXT | What the rule detects |
-| severity | TEXT | Base severity |
-| enabled | INTEGER | 1 = enabled, 0 = disabled |
-| configuration_json | TEXT | Rule-specific settings JSON |
-| updated_at | TEXT | Last modification timestamp |
-
-### audit_events
-| Column | Type | Description |
-|--------|------|-------------|
-| id | INTEGER PK | Auto-increment |
-| timestamp_utc | TEXT | ISO-8601 UTC timestamp |
-| actor | TEXT | Who made the change |
-| action | TEXT | RULE_UPDATE / RULES_RESET / DEMO_RESET |
-| target | TEXT | Affected entity |
-| sanitized_details | TEXT | Change details |
+| Page | Description |
+|:-----|:------------|
+| 🏠 **Home / Command Center** | Real-time gateway status badge, live KPI cards (total requests, threats blocked, block rate, legitimate traffic), module navigation hub, and 1-click WAF smoke tests |
+| 📊 **Security Overview** | Live Plotly charts: ALLOW/BLOCK donut, hourly timeline, attack categories, status code distribution, and top triggered rule |
+| ⚔️ **Attack Simulator** | Built-in pen-testing sandbox: fire SQLi, XSS, Path Traversal, and rate-limit burst scenarios through the live WAF and see real block/allow decisions |
+| 📜 **Security Logs** | Full forensic audit trail with filtering by decision, severity, category, and time range; export to CSV |
+| ⚙️ **Rules Config** | Enable/disable each of the 10 rules at runtime without restarting services; reset to defaults |
+| 📋 **Reports** | Compliance and incident summary export with threat trend analytics |
+| ℹ️ **System Info** | Gateway health probe, upstream connectivity, SQLite WAL status, security header verification |
 
 ---
 
-## 10. API Reference
+## 6. API Reference
 
-All endpoints are served by the WAF gateway at `http://localhost:5000`.
+All endpoints are served by the WAF Gateway. Admin endpoints require `X-API-Key: <API_SECRET>` header.
 
-| Method | Endpoint | Auth Required | Description |
-|--------|----------|---------------|-------------|
+| Method | Endpoint | Auth | Description |
+|:-------|:---------|:-----|:------------|
 | GET | `/health` | No | Gateway liveness probe |
-| GET | `/api/stats` | No | Aggregate statistics |
-| GET | `/api/events` | No | Security event list (filterable) |
-| GET | `/api/events/<id>` | No | Single event by request ID |
-| GET | `/api/charts` | No | Chart data |
-| GET | `/api/rules` | No | All security rules |
-| PATCH | `/api/rules/<rule_id>` | Yes | Enable/disable a rule |
+| GET | `/api/stats` | No | Aggregate statistics (totals, block %) |
+| GET | `/api/events` | No | Security event list (filterable + paginated) |
+| GET | `/api/events/<id>` | No | Single event by request UUID |
+| GET | `/api/charts` | No | Chart-ready event data |
+| GET | `/api/rules` | No | All 10 security rules + enabled state |
+| PATCH | `/api/rules/<rule_id>` | Yes | Toggle a rule enabled/disabled |
 | POST | `/api/rules/reset` | Yes | Reset all rules to defaults |
-| POST | `/api/demo/reset` | Yes | Clear demo events |
-| GET | `/api/db-stats` | No | Database statistics |
-| GET | `/api/audit` | Yes | Audit event log |
+| POST | `/api/demo/reset` | Yes | Clear all demo event data |
+| GET | `/api/db-stats` | No | SQLite WAL size, event count |
+| GET | `/api/audit` | Yes | Admin audit trail |
 
-**Query parameters for `/api/events`:**
-- `limit` (int, max 1000)
-- `offset` (int)
-- `decision` (ALLOW | BLOCK | RATE_LIMITED | VALIDATION_ERROR)
-- `severity` (INFO | LOW | MEDIUM | HIGH | CRITICAL)
-- `category` (SQL_INJECTION | XSS | PATH_TRAVERSAL | VALIDATION | RATE_LIMIT | NONE)
-- `from` (ISO timestamp)
-- `to` (ISO timestamp)
-
-**Authentication:** Pass `X-API-Key: <API_SECRET>` header for admin endpoints.
+**`/api/events` query parameters:**
+```
+limit     int  (max 1000)
+offset    int
+decision  ALLOW | BLOCK | RATE_LIMITED | VALIDATION_ERROR
+severity  INFO | LOW | MEDIUM | HIGH | CRITICAL
+category  SQL_INJECTION | XSS | PATH_TRAVERSAL | VALIDATION | RATE_LIMIT | NONE
+from      ISO-8601 timestamp
+to        ISO-8601 timestamp
+```
 
 ---
 
-## 11. Docker Architecture
+## 7. Database Schema
 
-```
-Docker Host (localhost)
-├── Port 8501 ──► sentinelshield-dashboard (Streamlit)
-├── Port 5000 ──► sentinelshield-gateway (Flask/Gunicorn)
-│                        │
-│               sentinelshield-net (bridge network)
-│                        │
-│                        └──► sentinelshield-protected-app (Flask/Gunicorn)
-│                              [NO host port — internal only]
-│
-└── Volume: sentinelshield-waf-data (SQLite database)
-```
+### `security_events`
 
-**Security properties:**
-- All host ports bound to `127.0.0.1` — not reachable from other machines.
-- Protected app has **no `ports:` mapping** — cannot be reached from the host.
-- Containers run as non-root users.
-- No Docker socket mounts.
-- `privileged: false` (default).
+| Column | Type | Description |
+|:-------|:-----|:------------|
+| `id` | INTEGER PK | Auto-increment |
+| `request_id` | TEXT | UUID4 correlation ID |
+| `timestamp_utc` | TEXT | ISO-8601 UTC |
+| `method` | TEXT | HTTP method |
+| `route` | TEXT | Sanitized path |
+| `decision` | TEXT | ALLOW / BLOCK / RATE_LIMITED / VALIDATION_ERROR |
+| `status_code` | INTEGER | HTTP response code |
+| `matched_rule_ids` | TEXT | JSON array of rule IDs |
+| `attack_category` | TEXT | SQL_INJECTION / XSS / PATH_TRAVERSAL / etc. |
+| `severity` | TEXT | INFO / LOW / MEDIUM / HIGH / CRITICAL |
+| `reason` | TEXT | Human-readable detection reason |
+| `processing_time_ms` | REAL | Gateway latency in ms |
+| `sanitized_client_id` | TEXT | Hashed/truncated client IP |
+
+### `security_rules`
+
+| Column | Type | Description |
+|:-------|:-----|:------------|
+| `rule_id` | TEXT PK | e.g. `SQL-001` |
+| `enabled` | INTEGER | `1` = active, `0` = disabled |
+| `configuration_json` | TEXT | Rule-specific tuning params |
+| `updated_at` | TEXT | Last modification |
+
+### `audit_events`
+
+| Column | Type | Description |
+|:-------|:-----|:------------|
+| `id` | INTEGER PK | Auto-increment |
+| `action` | TEXT | `RULE_UPDATE` / `RULES_RESET` / `DEMO_RESET` |
+| `actor` | TEXT | Who made the change |
+| `target` | TEXT | Affected rule/entity |
 
 ---
 
-## 12. Installation
+## 8. Local Development
 
 ### Prerequisites
-- Docker Desktop (Windows/Mac/Linux) with Docker Compose v2
-- 4 GB RAM available for containers
-- Ports 5000 and 8501 free on localhost
+- Docker Desktop with Compose v2
+- Ports `5000` and `8501` free on localhost
 
-### Steps
+### Run Locally
 
 ```bash
-# 1. Clone or download the project
-git clone <your-repo-url> sentinelshield
+# Clone the repo
+git clone https://github.com/Pegasus2005/acc_ia.git sentinelshield
 cd sentinelshield
 
-# 2. (Optional) Copy environment file
-copy .env.example .env
-
-# 3. Build and start all services
+# Start all 3 services (builds Docker images on first run ~3-5 min)
 docker compose up --build
+
+# Open in browser
+# Dashboard:  http://localhost:8501
+# Gateway:    http://localhost:5000/health
 ```
 
-First build takes 3–5 minutes as Python packages are downloaded.
-
----
-
-## 13. Startup & Shutdown
-
-### Start
 ```bash
-docker compose up --build       # First time (builds images)
-docker compose up               # Subsequent starts (uses cached images)
-docker compose up -d            # Detached (background) mode
+# Stop (preserves SQLite data)
+docker compose down
+
+# Stop + wipe database
+docker compose down -v
 ```
 
-### Access
-| Service | URL |
-|---------|-----|
-| 🛡️ WAF Gateway | http://localhost:5000 |
-| 📊 Dashboard | http://localhost:8501 |
-| 🔒 Protected App | Not directly accessible (by design) |
-
-### Stop
-```bash
-docker compose down             # Stop and remove containers (data persists)
-docker compose down -v          # ⚠️ ALSO deletes named volumes (CLEARS DATABASE)
-```
-
-### Logs
-```bash
-docker compose logs -f                    # All services
-docker compose logs -f waf-gateway        # Gateway only
-docker compose logs -f dashboard          # Dashboard only
-```
-
----
-
-## 14. Running Tests
-
-### Unit Tests (no Docker required)
+### Run Tests
 
 ```bash
-# Install test dependencies
-pip install -r tests/requirements.txt
+# Unit tests (no Docker needed)
 pip install -r gateway/requirements.txt
-
-# Run unit tests from project root
 pytest tests/test_unit.py -v
-```
 
-### Integration Tests (gateway must be running)
-
-```bash
-# Start gateway first
+# Integration tests (gateway must be running)
 docker compose up -d
-
-# Run integration tests
 pytest tests/test_integration.py -v
-
-# Or with custom gateway URL
-GATEWAY_URL=http://localhost:5000 pytest tests/test_integration.py -v
-```
-
-### All Tests
-
-```bash
-pytest tests/ -v
 ```
 
 ---
 
-## 15. Troubleshooting
+## 9. Cloud Deployment (Render)
 
-| Problem | Solution |
-|---------|----------|
-| Port 5000 already in use | `docker compose down` then retry, or change port in compose.yaml |
-| Port 8501 already in use | Same as above |
-| Dashboard shows "Cannot connect to gateway" | Wait 20s after `docker compose up` for health checks to pass |
-| Protected app unreachable | By design — access via gateway on port 5000 |
-| Database locked errors | Restart with `docker compose restart waf-gateway` |
-| Build fails | Ensure Docker Desktop is running and you have internet access |
-| Logs lost after `down -v` | Use `docker compose down` (without `-v`) to preserve the volume |
+This project is deployed as **3 free Web Services** on Render (no Blueprint, no paid disk):
+
+### Service 1 — `sentinelshield-protected-app`
+
+| Setting | Value |
+|:--------|:------|
+| Runtime | Docker |
+| Dockerfile | `./protected_app/Dockerfile` |
+| Docker Context | `./protected_app` |
+| Plan | Free |
+
+**Environment Variables:**
+| Key | Value |
+|:----|:------|
+| `PYTHONUNBUFFERED` | `1` |
 
 ---
 
-## 16. Security Limitations
+### Service 2 — `sentinelshield-gateway`
+
+| Setting | Value |
+|:--------|:------|
+| Runtime | Docker |
+| Dockerfile | `./gateway/Dockerfile` |
+| Docker Context | `./gateway` |
+| Plan | Free |
+
+**Environment Variables:**
+| Key | Value |
+|:----|:------|
+| `PROTECTED_APP_URL` | `https://sentinelshield-protected-app.onrender.com` |
+| `DB_PATH` | `/tmp/sentinelshield.db` |
+| `API_SECRET` | `<your-secret-string>` |
+| `PYTHONUNBUFFERED` | `1` |
+
+> ⚠️ `/tmp` is ephemeral on free tier — event history resets on each deploy/restart. Upgrade to a paid plan with a Persistent Disk for durability.
+
+---
+
+### Service 3 — `sentinelshield-dashboard`
+
+| Setting | Value |
+|:--------|:------|
+| Runtime | Docker |
+| Dockerfile | `./dashboard/Dockerfile` |
+| Docker Context | `./dashboard` |
+| Plan | Free |
+
+**Environment Variables:**
+| Key | Value |
+|:----|:------|
+| `GATEWAY_URL` | `https://sentinelshield-gateway.onrender.com` |
+| `API_SECRET` | `<same secret as gateway>` |
+| `PYTHONUNBUFFERED` | `1` |
+
+---
+
+## 10. Security Limitations
 
 This is an **educational tool**, not a production-grade WAF. Known limitations:
 
-1. **Pattern-based detection has false negatives.** Novel encodings, out-of-band channels, or obfuscated payloads may evade regex rules.
-2. **Rate limiting is in-memory.** Resets on container restart. Not suitable for distributed deployments.
-3. **IP-based identification is unreliable.** Behind NAT or proxies, multiple users share an IP.
-4. **No TLS.** The gateway does not terminate HTTPS.
-5. **Rule coverage is limited.** Only common, well-known patterns are covered.
-6. **Second-order injection not detected.** Payloads stored and later executed are not caught at input time.
-7. **Local demo only.** Do not expose to the internet without a full security review.
-8. **API key is a demo credential.** Change `API_SECRET` in `.env` before any non-trivial use.
+1. **Pattern-based detection has false negatives.** Novel encodings and obfuscated payloads can evade regex rules.
+2. **Rate limiting is in-memory.** Resets on container restart. Not suitable for distributed or multi-worker deployments.
+3. **IP identification is unreliable.** Clients behind NAT or shared proxies share an IP address.
+4. **No TLS termination.** HTTPS is handled by Render's edge; the gateway itself speaks HTTP internally.
+5. **Rule coverage is limited.** Only common, well-known OWASP Top 10 patterns are covered.
+6. **Second-order injection not detected.** Payloads stored and later rendered are not re-inspected at output.
+7. **API key is a demo credential.** Change `API_SECRET` before any non-trivial use.
 
 ---
 
-## 17. Future Enhancements
+## 11. Demo Script (2.5 minutes)
 
-- TLS termination with a self-signed certificate for HTTPS demo
-- Machine-learning anomaly detection for unknown attack patterns
-- Multi-node deployment with Redis for distributed rate limiting
-- Webhook alerts for high-severity events
-- OWASP ModSecurity CRS rule import
-- GraphQL API for richer dashboard queries
-- Automated rule updates from a CVE feed
+### Before Recording
+- Open the dashboard URL in an **incognito browser tab** for a clean UI.
+- Run the Attack Simulator a few times first so charts already have data.
+- Use **OBS**, **Loom**, or Windows **Xbox Game Bar** (`Win + G`) to capture.
 
 ---
 
-## 18. Optional AWS Deployment
+### `[0:00–0:25]` Home Page — Command Center
 
-> ⚠️ This section describes a *design* only. No AWS resources are provisioned by this project.
+> *"SentinelShield is a cloud-deployed Web Application Firewall. Every request on the internet passes through the Gateway before touching the backend. Here on the home page we can see real-time telemetry: total requests inspected, how many threats were blocked, the block rate, and legitimate traffic forwarded."*
 
-A production-equivalent architecture on AWS would use:
+👉 Hover over the **4 KPI cards** → point to the **green GATEWAY ONLINE pill**.
+
+---
+
+### `[0:25–0:45]` Home Page — Live 1-Click Smoke Test
+
+> *"Let me show you the WAF in action — I'll fire a legitimate request and a SQL injection probe."*
+
+👉
+1. Click **🟢 Send Legitimate Request** → show `Decision: ALLOW`
+2. Click **🔴 Send SQL Injection Probe** → show `Decision: BLOCK`
+
+> *"That SQL injection — quote OR one-equals-one — was caught in milliseconds at the firewall layer. The backend never saw it."*
+
+---
+
+### `[0:45–1:30]` Attack Simulator — Live Attack Demo
+
+> *"Now let's go to the full penetration-testing sandbox."*
+
+👉
+1. Sidebar → **Attack Simulator**
+2. Select **XSS Script Injection** preset → click **Launch Attack** → show red `BLOCKED` card with rule `XSS-001`
+3. Switch to **Path Traversal** → **Launch** → show `BLOCKED` with rule `PT-001`
+
+> *"Script tags, dot-dot-slash directory traversal — all intercepted and logged in milliseconds before the backend processes a single byte."*
+
+---
+
+### `[1:30–1:55]` Security Overview — Live Analytics
+
+> *"Every blocked and allowed request is logged with forensic metadata. The Overview shows trends over time."*
+
+👉
+1. Sidebar → **Security Overview**
+2. Point to the **ALLOW/BLOCK donut chart** → hover the **hourly timeline** to show tooltips
+
+> *"This is live data from the SQLite event store. You can see the attack spike from our simulation just now."*
+
+---
+
+### `[1:55–2:25]` Security Logs — Forensics
+
+> *"For incident response, the Security Logs page gives a full audit trail."*
+
+👉
+1. Sidebar → **Security Logs**
+2. Filter dropdown → select **BLOCK** decisions only
+3. Point to matched rule IDs, attack category, latency, and timestamp columns
+
+> *"Every event has a unique Request ID, matched rule IDs, attack category, processing latency in milliseconds, and a sanitized client fingerprint — ready for compliance or incident reporting."*
+
+---
+
+### `[2:25–2:50]` Rules Config — Live Rule Management
+
+> *"Security teams can manage the rule engine in real time without restarting any service."*
+
+👉
+1. Sidebar → **Rules Config**
+2. Show the rule list (SQL-001 through RL-001)
+3. **Toggle OFF** a rule (e.g. Rate Limiter) → toggle it **back ON**
+
+> *"Rules can be enabled, disabled, or tuned on the fly. The gateway picks up changes immediately."*
+
+---
+
+### `[2:50–3:00]` Wrap-Up
+
+> *"SentinelShield is a fully cloud-deployed, production-realistic WAF — three containerized Docker services running on Render's free tier, with a real-time Security Operations Center. A transparent reverse proxy that protects any upstream service without modifying a single line of backend code."*
+
+👉 Return to **Home page** to end on the clean command center view.
+
+---
+
+## Project Structure
 
 ```
-Users → Amazon CloudFront → AWS WAF (managed rule groups)
-                        → Application Load Balancer
-                        → ECS Fargate (Flask gateway containers)
-                        → ECS Fargate (protected app containers)
-                        → Amazon RDS / Aurora (replace SQLite)
-                        → CloudWatch Logs (replace local logging)
-                        → S3 (log archiving)
+sentinelshield/
+├── gateway/                    # WAF reverse proxy
+│   ├── app.py                  # Flask app, proxy handler, all API endpoints
+│   ├── rules_engine.py         # Regex detection rules + rate limiter
+│   ├── database.py             # SQLite schema, logging, rule management
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── protected_app/              # Mock backend (no public port)
+│   ├── app.py                  # 6 safe endpoints with static sample data
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── dashboard/                  # Streamlit SOC dashboard
+│   ├── Home.py                 # Landing page + command center
+│   ├── api_client.py           # Shared HTTP client for all pages
+│   ├── pages/
+│   │   ├── 1_Overview.py       # KPI cards + 5 live Plotly charts
+│   │   ├── 2_Attack_Simulator.py # Pen-testing sandbox
+│   │   ├── 3_Security_Logs.py  # Filterable forensic log
+│   │   ├── 4_Rules_Config.py   # Rule enable/disable + reset
+│   │   ├── 5_Reports.py        # Analytics export
+│   │   └── 6_System_Info.py    # Health checks + architecture
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── tests/                      # Unit + integration tests (pytest)
+├── compose.yaml                # Docker Compose for local development
+├── render.yaml                 # Render cloud deployment config
+└── README.md
 ```
 
-**Key distinctions:**
-- **AWS WAF** protects AWS resources (CloudFront, ALB, API Gateway, AppSync). It is not a drop-in replacement for a localhost security proxy.
-- **AWS WAF Managed Rules** (e.g., AWSManagedRulesCommonRuleSet) offer professionally maintained, frequently updated patterns that go far beyond this project's regex rules.
-- **CloudWatch** provides centralized, durable, searchable log aggregation.
-
-**Cost note:** AWS WAF charges per WebACL, rule group, and million requests. Enable cost alerts before deploying.
-
 ---
 
-## 19. Screencast Script
-
-*Target duration: 7–8 minutes. Four speakers.*
-
----
-
-### 🎬 Segment 1 — Introduction & Problem Statement (Speaker 1 · ~90 seconds)
-
-> "Web applications are the primary attack surface for most organizations.
-> SQL injection alone has caused billions in damages over the past decade.
-> Today we're demonstrating SentinelShield — a Dockerized educational WAF
-> built from scratch in Python. It sits between a browser and a vulnerable
-> demo application, inspects every request, blocks malicious ones, and logs
-> every decision. Let me show you the architecture."
-
-*Show the architecture diagram from System Info page.*
-
-> "Three Docker containers. Gateway in the middle. Dashboard for monitoring.
-> The protected app has no host port — it cannot be reached directly."
-
----
-
-### 🎬 Segment 2 — Architecture & Stack (Speaker 2 · ~60 seconds)
-
-*Switch to terminal — show `docker compose up --build` output.*
-
-> "One command starts the entire system. Flask handles the gateway logic.
-> Streamlit gives us a real-time dashboard. SQLite persists every security event
-> through container restarts. All containers run as non-root users."
-
-*Open browser to http://localhost:8501*
-
-> "The dashboard is live. Let's look at the overview."
-
----
-
-### 🎬 Segment 3 — Live Normal Request Demo (Speaker 2 · ~30 seconds)
-
-*Navigate to Attack Simulator page.*
-*Select: "1. Normal Search Request" → Run.*
-
-> "A legitimate search request passes all 12 security rules.
-> Status 200. Decision: ALLOW. 2 milliseconds processing time.
-> The protected app responded with search results."
-
----
-
-### 🎬 Segment 4 — Attack Demonstrations (Speaker 3 · ~90 seconds)
-
-*Select: "2. SQL Injection Pattern" → Run.*
-
-> "Classic SQL tautology: single-quote OR one-equals-one.
-> Status 403. Decision: BLOCK. Rule SQL-001 matched.
-> The protected application never received this request."
-
-*Select: "4. XSS Script Tag" → Run.*
-
-> "Script tag injection. Blocked by XSS-001 before it could reach the app.
-> Even if it had reached the app, output is HTML-escaped — so it wouldn't execute."
-
-*Select: "6. Path Traversal" → Run.*
-
-> "Dot-dot-slash traversal attempt, URL-normalized before pattern matching.
-> Blocked by PT-001. Gateway decodes encoded sequences up to three rounds."
-
-*Select: "7. Rate Limit Test" → Run.*
-
-> "35 rapid requests. First 30 allowed, subsequent ones return HTTP 429.
-> Each event is logged, so we can see the pattern in the log view."
-
----
-
-### 🎬 Segment 5 — Logs & Analytics (Speaker 3 · ~60 seconds)
-
-*Navigate to Security Logs page.*
-
-> "Every decision is stored. Filter by decision, severity, category, or time range.
-> Export to CSV — values are sanitized against spreadsheet formula injection."
-
-*Navigate to Overview page.*
-
-> "KPIs from actual stored data. Donut chart, time series, category bar.
-> These are not hardcoded — they update as we run more tests."
-
----
-
-### 🎬 Segment 6 — Rule Configuration Demo (Speaker 4 · ~60 seconds)
-
-*Navigate to Rules & Configuration page.*
-
-> "12 rules, each with description and severity. Let's disable SQL-001."
-
-*Toggle SQL-001 off.*
-
-*Switch to Attack Simulator → run SQL Injection scenario.*
-
-> "With SQL-001 disabled, the tautology passes — decision is now ALLOW.
-> This shows exactly why each rule matters."
-
-*Toggle SQL-001 back on.*
-
-> "Rule restored. The audit trail in the database records every change."
-
----
-
-### 🎬 Segment 7 — Test Results & Docker (Speaker 4 · ~60 seconds)
-
-*Show terminal running: `pytest tests/test_unit.py -v`*
-
-> "32 unit tests. SQL injection, XSS, path traversal, rate limiting, database
-> operations, normalization — all green without Docker."
-
-> "Integration tests send real requests through the running gateway and verify
-> the protected app is genuinely unreachable on port 5001."
-
-> "Stopping: docker compose down. Data persists in the named volume."
-
----
-
-### 🎬 Segment 8 — Conclusion (Speaker 1 · ~30 seconds)
-
-> "SentinelShield demonstrates how a layered security approach works:
-> pattern matching at the gateway, parameterized queries in the app,
-> HTML escaping on output. No single control is sufficient.
-> Regex-based WAFs have known bypass techniques — this is an educational
-> tool showing the principles, not a replacement for a production WAF.
-> Questions?"
-
----
-
-## 20. Presentation Slides Outline
-
-### Slide 1 — Title
-- SentinelShield: Web Application Firewall & Attack Simulation Platform
-- Team member names · Course · Date
-
-### Slide 2 — Problem Statement
-- OWASP Top 10: Injection, XSS, Broken Access Control
-- Real-world impact: data breaches, financial loss
-- Educational gap: how do WAFs actually work?
-
-### Slide 3 — System Architecture
-- Mermaid diagram (from README)
-- Three Docker services, one named volume
-- Localhost-only binding
-
-### Slide 4 — Technology Stack
-- Table: Flask, Streamlit, SQLite, Plotly, Docker Compose
-- Why each technology was chosen
-
-### Slide 5 — Detection Rules
-- Table of 12 rules with categories and severities
-- Input normalization (URL-decode up to 3 rounds)
-- Rate limiting mechanism
-
-### Slide 6 — Live Demo Results
-- Screenshots: Attack Simulator pass/fail cards
-- Screenshots: Security log filtered view
-- Screenshots: Overview dashboard charts
-
-### Slide 7 — Test Results
-- pytest output screenshot
-- Unit test count and categories
-- Integration test: protected-app isolation verified
-
-### Slide 8 — Limitations & Future Work
-- Known bypass methods for regex-based WAFs
-- Production WAF comparison (AWS WAF, ModSecurity)
-- Future: TLS, ML anomaly detection, distributed rate limiting
-
----
-
-*End of README*
+*SentinelShield — Built with Flask, Streamlit, SQLite, Docker, and deployed on Render.*

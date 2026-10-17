@@ -8,7 +8,7 @@ It should only be reachable through the WAF gateway.
 """
 
 import logging
-from flask import Flask, jsonify, request, escape
+from flask import Flask, jsonify, request
 from markupsafe import escape as html_escape
 import json
 
